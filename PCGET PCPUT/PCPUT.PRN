@@ -1,0 +1,439 @@
+
+
+                ; North Star Advantage Version
+                ;
+                ;  of PCPUT
+                ;
+                ;  Hacked by Holger Linning for the Advantage Computer
+                ;
+                ;	Ver	Date	   Desc
+                ;   	---    --------    -----------------------------------------------
+                ;	1.0    01/20/20	   Initial version 
+                ;
+                ;
+                ;
+                ;  North Star Horizon Version. Assumes 4MHz CPU
+                ;
+                ;  PCPUT - This CP/M program sends a file from a CP/M system to a PC
+                ;  via a serial The file transfer uses the XMODEM protocol. 
+                ;
+                ;  Note this program is gutted from the Ward Christenson Modem program.
+                ;
+                ;  Hacked together by Mike Douglas for the VG Bitstreamer II board
+                ;
+                ;	Ver	Date	   Desc
+                ;   	---    --------    -----------------------------------------------
+                ;	1.0    10/7/15	   Initial version. This code is almost the same 
+                ;			   as the Vector Graphic version as both use the
+                ;			   same 8251 ports for serial I/O.
+                ;
+                
+ FFFF =         TRUE    equ     0ffffh          ;define value of true 
+ 0000 =         FALSE   equ     NOT TRUE        ;define value of false 
+                
+                ;*****************************************************************************
+                ;
+                ;  Switch for running under Advantage emulator ADE or not 
+                ;   
+                ;     see: North Star Advantage Z80 Computer Emulator (ADE) 
+                ;          Jack Strangio
+                ;          http://www.itelsoft.com.au/north_star_advantage_emulator.html
+                ;
+                ;  The emulator can be used for testing and debugging this program. If
+                ;  runnuing under ADE set the directive to TRUE.
+                ;
+                ;*****************************************************************************
+                
+ 0000 =         ADE     equ     FALSE           ;TRUE = ADE, FALSE = real Machine
+                
+                ;  Serial Port Equates
+                
+ 0051 =         SIOACR	equ	51h		;control, SIO Board in slot 1
+ 0050 =         SIOADR	equ	50h		;data, SIO Board in slot 1
+                
+ 0041 =         SIOBCR	equ	41h		;control, SIO Board in slot 2
+ 0040 =         SIOBDR	equ	40h		;data, SIO Board in slot 2
+                
+ 0002 =         SIORDA	equ	02h		;read data available flag
+ 0001 =         SIOTRE	equ	01h		;transmit register empty flag
+                
+ 0005 =         ERRLMT	EQU	5		;MAX ALLOWABLE ERRORS
+                
+                ; XMODEM equates
+                        IF      NOT ADE
+ 0001 =         SOH	equ	001h
+ 0004 =         EOT	equ	004h
+ 0006 =         ACK	equ	006h
+ 0015 =         NAK	equ	015h
+                        ENDIF
+                
+                        IF      ADE
+                DUMMY   equ     0ffh
+                SOH	equ	DUMMY           ;use dummy values for XMODEM            
+                EOT	equ	DUMMY           
+                ACK	equ	DUMMY
+                NAK	equ	DUMMY
+                        ENDIF
+                
+                ;DEFINE ASCII CHARACTERS USED
+                
+ 0003 =         CTRLC	EQU	3		;Control-C
+ 000A =         LF	EQU	10
+ 000D =         CR	EQU	13
+                
+ 0100           	org	100h
+                
+                ;  Verify a file name was specified
+                
+ 0100 3A5D00    	lda	PARAM1		;A=1st character of parameter 1
+ 0103 FE20      	cpi	' '		;make sure file name present
+ 0105 C21101    	jnz	haveFn		;yes, have a file name
+ 0108 116B03    	lxi	d,mHelp		;display usage message
+ 010B 0E09      	mvi	c,print
+ 010D CD0500    	call	bdos
+ 0110 C9        	ret			;return to CPM
+                
+                ;  See if port "B" specified (2nd parameter) (meaning for Advantage: Port B = SIO in Slot 2, else 1)
+                
+ 0111 0650      haveFn	mvi	b,SIOADR	;assume port b not used
+ 0113 3A6D00    	lda	PARAM2		;A=1st character of parameter 2
+ 0116 FE32      	cpi	'2'		;port b specified?
+ 0118 C21D01    	jnz	doXfer		;no, go do the transfer
+ 011B 0640      	mvi	b,SIOBDR	;use port b
+                	
+                ;  doXfer - Switch to local stack and do the transfer
+                
+ 011D 78        doXfer	mov	a,b		;a=address of serial port to use
+ 011E 322A02    	sta	rcvSDR		;modify IN instruction for data register
+ 0121 323E02    	sta	sndSDR		;modify OUT instruction for data register
+ 0124 3C        	inr	a		;a=serial port control register address
+ 0125 320E02    	sta	rcvSCR		;modify IN for control register in RECV
+ 0128 323602    	sta	sndSCR		;modify IN for control register in SEND
+ 012B 210000    	LXI	H,0		;HL=0
+ 012E 39        	DAD	SP		;HL=STACK FROM CP/M
+ 012F 224104    	SHLD	STACK		;..SAVE IT
+ 0132 314104    	LXI	SP,STACK	;SP=MY STACK
+ 0135 AF        	xra	a		
+ 0136 324304    	sta	SECTNO		;initialize sector number to zero
+ 0139 CDDD01    	CALL	OPEN$FILE	;OPEN THE FILE
+ 013C 111703    	lxi	d,mRcvA		;assume using port A
+ 013F 3A2A02    	lda	rcvSDR		;using port A or B?
+ 0142 FE50      	cpi	SIOADR
+ 0144 CA4A01    	jz	sendA
+ 0147 114103    	lxi	d,mRcvB		;using port B
+ 014A 0E09      sendA	MVI	C,PRINT
+ 014C CD0500    	CALL	BDOS		;PRINT ID MESSAGE
+                
+                        IF      ADE
+                        jmp     SENDB           ;no need to wait
+                        ENDIF
+                
+                ;  GOBBLE UP GARBAGE CHARS FROM THE LINE
+                
+ 014F 0601      purge	MVI	B,1		;times out after 1 second if no data
+ 0151 CD0902    	CALL	RECV
+ 0154 DA5F01    	jc	lineClr		;line is clear, go wait for initial NAK
+ 0157 FE03      	cpi	ctrlc		;exit if abort requested
+ 0159 CADE02    	jz	abort
+ 015C C34F01    	jmp	purge
+                
+                ; WAIT FOR INITIAL NAK, THEN SEND THE FILE
+                	
+ 015F AF        lineClr	xra	a		;clear crc flag = checksum mode
+ 0160 324504    	sta	crcFlag
+ 0163 0601      WAITNAK	MVI	B,1		;TIMEOUT DELAY
+ 0165 CD0902    	CALL	RECV
+ 0168 DA6301    	JC	WAITNAK
+ 016B FE03      	cpi	ctrlc		;abort requested?
+ 016D CADE02    	jz	abort
+ 0170 FE15      	CPI	NAK		;NAK RECEIVED?
+ 0172 CA7D01    	jz	SENDB		;yes, send file in checksum mode
+ 0175 FE43      	cpi	'C'		;'C' for CRC mode received?
+ 0177 C26301    	JNZ	WAITNAK		;no, keep waiting
+ 017A 324504    	sta	crcFlag		;set CRC flag non-zero = true
+                				;fall through to start the send operation
+                ;
+                ;*****************SEND A FILE***************
+                ;
+                
+                ;READ SECTOR, SEND IT
+                
+ 017D CD4002    SENDB	CALL	READ$SECTOR
+ 0180 3A4304    	LDA	SECTNO		;INCR SECT NO.
+ 0183 3C        	INR	A
+ 0184 324304    	STA	SECTNO
+                
+                ;SEND OR REPEAT SECTOR
+                
+ 0187 3E01      REPTB	MVI	A,SOH
+ 0189 CD3202    	CALL	SEND
+ 018C 3A4304    	LDA	SECTNO
+ 018F CD3202    	CALL	SEND
+ 0192 3A4304    	LDA	SECTNO
+ 0195 2F        	CMA
+ 0196 CD3202    	CALL	SEND
+ 0199 210000    	lxi	h,0		;init crc to zero
+ 019C 224604    	shld	crc16
+ 019F 4C        	mov	c,h		;init checksum in c to zero
+ 01A0 218000    	LXI	H,80H
+ 01A3 7E        SENDC	MOV	A,M
+ 01A4 CD3202    	CALL	SEND
+ 01A7 CDF702    	call	calCrc		;update CRC
+ 01AA 23        	INX	H
+ 01AB 7C        	MOV	A,H
+ 01AC FE01      	CPI	1		;DONE WITH SECTOR?
+ 01AE C2A301    	JNZ	SENDC
+                
+                ; Send checksum or CRC based on crcFlag
+                
+ 01B1 3A4504    	lda	crcFlag		;crc or checksum?
+ 01B4 B7        	ora	a
+ 01B5 CAC401    	jz	sndCsum		;flag clear = checksum
+ 01B8 3A4704    	lda	crc16+1		;a=high byte of CRC
+ 01BB CD3202    	call	SEND		;send it
+ 01BE 3A4604    	lda	crc16		;a=low byte of crc
+ 01C1 C3C501    	jmp	sndSkip		;skip next instruction	
+ 01C4 79        sndCsum	mov	a,c		;send the checksum byte
+ 01C5 CD3202    sndSkip	call	SEND
+                
+                ;GET ACK ON SECTOR
+                
+ 01C8 0604      	MVI	B,4		;WAIT 4 SECONDS MAX
+ 01CA CD0902    	CALL	RECV
+ 01CD DA8701    	JC	REPTB		;TIMEOUT, SEND AGAIN
+                
+                ;NO TIMEOUT SENDING SECTOR
+                
+ 01D0 FE06      	CPI	ACK		;ACK RECIEVED?
+ 01D2 CA7D01    	JZ	SENDB		;..YES, SEND NEXT SECT
+ 01D5 FE03      	cpi	ctrlc		;control-c to abort?
+ 01D7 CADE02    	jz	abort
+ 01DA C38701    	JMP	REPTB		;PROBABLY NAK - TRY AGAIN
+                ;
+                ;
+                ; S U B R O U T I N E S
+                ;
+                ;OPEN FILE
+ 01DD 115C00    OPEN$FILE LXI	D,FCB
+ 01E0 0E0F      	MVI	C,OPEN
+ 01E2 CD0500    	CALL	BDOS
+ 01E5 3C        	INR	A		;OPEN OK?
+ 01E6 C0        	RNZ			;GOOD OPEN
+ 01E7 CDFE01    	CALL	ERXIT
+ 01EA 0D0A43616E	DB	13,10,'Can''t Open File',13,10,'$'
+                
+                ; - - - - - - - - - - - - - - -
+                ;EXIT PRINTING MESSAGE FOLLOWING 'CALL ERXIT'
+ 01FE D1        ERXIT	POP	D		;GET MESSAGE
+ 01FF 0E09      	MVI	C,PRINT
+ 0201 CD0500    	CALL	BDOS		;PRINT MESSAGE
+ 0204 2A4104    EXIT	LHLD	STACK		;GET ORIGINAL STACK
+ 0207 F9        	SPHL			;RESTORE IT
+ 0208 C9        	RET			;--EXIT-- TO CP/M
+                
+                ; - - - - - - - - - - - - - - -
+                ;MODEM RECV
+                ;-------------------------------------
+ 0209 D5        RECV	PUSH	D		;SAVE
+ 020A 1100F8    MSEC	lxi	d,(248shl 8)	;63 cycles, 4.032ms/wrap*248=1s (4MHz)
+                
+ 020E =         rcvSCR	equ	$+1		;address of I/O port for the following IN
+ 020D DB51      MWTI	IN	SIOACR		;(10)
+                
+                        IF      ADE
+                        mvi     a,SIORDA        ;character always available if ADE
+                        ENDIF
+                
+ 020F E602      	ANI	SIORDA		;(7)
+ 0211 C22902    	JNZ	MCHAR		;(10) GOT CHAR
+                
+                ; no character present, decrement timeout
+                
+ 0214 FE00      	cpi	0		;(7) waste some time
+ 0216 FE00      	cpi	0		;(7) waste some time
+ 0218 FE00      	cpi	0		;(7) waste some time
+ 021A 1D        	DCR	E		;(5) COUNT DOWN
+ 021B C20D02    	JNZ	MWTI		;(10) FOR TIMEOUT
+ 021E 15        	DCR	D		;do msb every 256th time
+ 021F C20D02    	JNZ	MWTI
+ 0222 05        	DCR	B		;DCR # OF SECONDS
+ 0223 C20A02    	JNZ	MSEC
+                
+                ;MODEM TIMED OUT RECEIVING
+                
+ 0226 D1        	POP	D		;RESTORE D,E
+ 0227 37        	STC			;CARRY SHOWS TIMEOUT
+ 0228 C9        	RET
+                
+                ;GOT MODEM CHAR
+                
+ 022A =         rcvSDR	equ	$+1		;address of I/O port for the following IN
+ 0229 DB50      MCHAR	IN	SIOADR
+                
+                        IF      ADE
+                        mvi     a,DUMMY         ;use just dummy character 
+                        ENDIF
+                
+ 022B D1        	POP	D		;RESTORE DE
+ 022C F5        	PUSH	PSW		;CALC CHECKSUM
+ 022D 81        	ADD	C
+ 022E 4F        	MOV	C,A
+ 022F F1        	POP	PSW
+ 0230 B7        	ORA	A		;TURN OFF CARRY TO SHOW NO TIMEOUT
+ 0231 C9        	RET
+                
+                ; - - - - - - - - - - - - - - -
+                ;MODEM SEND CHAR ROUTINE
+                ;----------------------------------
+                ;
+ 0232 F5        SEND	PUSH	PSW		;CHECK IF MONITORING OUTPUT
+ 0233 81        	ADD	C		;CALC CKSUM
+ 0234 4F        	MOV	C,A
+                
+ 0236 =         sndSCR	equ	$+1		;address of I/O port for the following IN
+ 0235 DB51      SENDW	IN	SIOACR
+ 0237 E601      	ANI	SIOTRE
+ 0239 CA3502    	JZ	SENDW
+ 023C F1        	POP	PSW		;GET CHAR
+                
+ 023E =         sndSDR	equ	$+1		;address of I/O port for the following IN
+ 023D D350      	OUT	SIOADR
+ 023F C9        	RET
+                
+                ;
+                ;FILE READ ROUTINE
+                ;
+                READ$SECTOR:
+ 0240 115C00    	LXI	D,FCB
+ 0243 0E14      	MVI	C,READ
+ 0245 CD0500    	CALL	BDOS
+ 0248 B7        	ORA	A
+ 0249 C8        	RZ
+ 024A 3D        	DCR	A		;EOF?
+ 024B C2AD02    	JNZ	RDERR
+                
+                ;EOF
+                
+ 024E AF        	XRA	A
+ 024F 324404    	STA	ERRCT
+ 0252 3E04      SEOT	MVI	A,EOT
+ 0254 CD3202    	CALL	SEND
+ 0257 0603      	MVI	B,3		;WAIT 3 SEC FOR TIMEOUT
+ 0259 CD0902    	CALL	RECV
+ 025C DAAA02    	JC	EOTTOT		;EOT TIMEOUT
+ 025F FE06      	CPI	ACK
+ 0261 CAC402    	JZ	XFER$CPLT
+                
+                ;ACK NOT RECIEVED
+                
+ 0264 3A4404    EOTERR	LDA	ERRCT
+ 0267 3C        	INR	A
+ 0268 324404    	STA	ERRCT
+ 026B FE05      	CPI	ERRLMT
+ 026D DA5202    	JC	SEOT
+ 0270 CDFE01    	CALL	ERXIT
+ 0273 0D0A0A    	db	13,10,10
+ 0276 4E6F204143	db	'No ACK received on EOT, but transfer is complete.',13,10,'$'
+                
+                ;
+                ;TIMEOUT ON EOT
+                ;
+ 02AA C36402    EOTTOT	JMP	EOTERR
+                ;
+                ;READ ERROR
+                ;
+ 02AD CDFE01    RDERR	CALL	ERXIT
+ 02B0 0D0A46696C	DB	13,10,'File Read Error',13,10,'$'
+                
+                ;DONE - CLOSE UP SHOP
+                
+                XFER$CPLT:
+ 02C4 CDFE01    	CALL	ERXIT
+ 02C7 0D0A0A5472	DB	13,10,10,'Transfer Complete',13,10,'$'
+                
+ 02DE CDFE01    abort	call	erxit
+ 02E1 0D0A0A5472	DB	13,10,10,'Transfer Aborted',13,10,'$'
+                
+                ;-----------------------------------------------------------------------------
+                ; calCrc - update the 16-bit CRC with one more byte. 
+                ;    (Copied from M. Eberhard)
+                ; On Entry:
+                ;   a has the new byte
+                ;   crc16 is current except this byte
+                ; On Exit:
+                ;   crc16 has been updated
+                ;   Trashes a,de
+                ;-----------------------------------------------------------------------------
+ 02F7 C5        calCrc	push	b		;save bc, hl
+ 02F8 E5        	push	h
+ 02F9 2A4604    	lhld	crc16		;get CRC so far
+ 02FC AC        	xra	h		;XOR into CRC top byte
+ 02FD 67        	mov	h,a
+ 02FE 012110    	lxi	b,1021h		;bc=CRC16 polynomial
+ 0301 1608      	mvi	d,8		;prepare to rotate 8 bits
+                
+                ; do 8 bit shift/divide by CRC polynomial
+                
+ 0303 29        cRotLp	dad	h		;16-bit shift
+ 0304 D20D03    	jnc	cClr		;skip if bit 15 was 0
+ 0307 7C        	mov	a,h		;CRC=CRC xor 1021H
+ 0308 A8        	xra	b
+ 0309 67        	mov	h,a
+ 030A 7D        	mov	a,l
+ 030B A9        	xra	c
+ 030C 6F        	mov	l,a
+ 030D 15        cClr	dcr	d
+ 030E C20303    	jnz	cRotLp		;rotate 8 times
+                
+                ; save the updated CRC and exit
+                
+ 0311 224604    	shld	crc16		;save updated CRC
+ 0314 E1        	pop	h		;restore hl, bc
+ 0315 C1        	pop	b
+ 0316 C9        	ret
+                
+                ;-----------------------------------------
+                ;  messages
+                ;-----------------------------------------
+                
+ 0317 5374617274mRcvA	db	'Start XMODEM receive now... (SIO slot 1) $'
+ 0341 5374617274mRcvB	db	'Start XMODEM receive now... (SIO slot 2) $'
+ 036B 0D0A504350mHelp	db	CR,LF,'PCPUT Ver 1.0 for North Star Advantage',CR,LF,LF
+ 0396 5472616E73	db	'Transmits a file to a PC through a serial port',CR,LF
+ 03C6 7573696E67	db	'using the XMODEM protocol.',CR,LF,LF
+ 03E3 5573616765	db	'Usage: PCPUT file.ext [S]',CR,LF
+ 03FE 2020205320	db	'   S = SIO slot (1 or 2)',CR,LF,'$'
+                
+                ; Data Area
+                
+ 0419           	DS	40	;STACK AREA
+ 0441           STACK	DS	2	;STACK POINTER
+ 0443           SECTNO	DS	1	;CURRENT SECTOR NUMBER 
+ 0444           ERRCT	DS	1	;ERROR COUNT
+ 0445           crcFlag	ds	1	;non-zero if using CRC
+ 0446           crc16	ds	2	;computed crc
+                
+                ;
+                ; BDOS EQUATES (VERSION 2)
+                ;
+ 0001 =         RDCON	EQU	1
+ 0002 =         WRCON	EQU	2
+ 0009 =         PRINT	EQU	9
+ 000B =         CONST	EQU	11	;CONSOLE STAT
+ 000F =         OPEN	EQU	15	;0FFH=NOT FOUND
+ 0010 =         CLOSE	EQU	16	;   "	"
+ 0011 =         SRCHF	EQU	17	;   "	"
+ 0012 =         SRCHN	EQU	18	;   "	"
+ 0013 =         ERASE	EQU	19	;NO RET CODE
+ 0014 =         READ	EQU	20	;0=OK, 1=EOF
+ 0015 =         WRITE	EQU	21	;0=OK, 1=ERR, 2=?, 0FFH=NO DIR SPC
+ 0016 =         MAKE	EQU	22	;0FFH=BAD
+ 0017 =         REN	EQU	23	;0FFH=BAD
+ 001A =         STDMA	EQU	26
+ 0005 =         BDOS	EQU	5
+ 0000 =         REIPL	EQU	0
+ 005C =         FCB	EQU	5CH	;SYSTEM FCB
+ 005D =         PARAM1	EQU	FCB+1	;COMMAND LINE PARAMETER 1 IN FCB
+ 006D =         PARAM2	EQU	PARAM1+16	;COMMAND LINE PARAMETER 2
+ 0448           	END
+
